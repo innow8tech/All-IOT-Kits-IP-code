@@ -1,0 +1,1558 @@
+#include <Wire.h>
+#include <Adafruit_SHT31.h>    
+#include <U8g2lib.h>   // Changed from Adafruit_SH110X to U8g2
+#include <Arduino.h>
+#include <WiFi.h>              
+#include <AsyncTCP.h>          
+#include <ESPAsyncWebServer.h>
+
+/****************** I2C Addresses *****************/
+#define WATER_LEVEL_ADDRESS     0x32
+#define TEMP_SENSOR_ADDRESS     0x33
+#define TDS_SENSOR_ADDRESS      0x35
+#define TURBIDITY_ADDRESS       0x36
+#define FLOW_SENSOR_ADDRESS     0x31
+#define PUMP_ADDRESS            0x5D
+#define COMMAND_REQUEST_DATA    2
+#define FLOW_COMMAND            0x02
+
+#define OLED_I2C_ADDRESS 0x3C
+
+// U8G2 Constructor - SH1106 128x64 I2C
+U8G2_SH1106_128X64_NONAME_F_HW_I2C u8g2(U8G2_R0, /* reset=*/ U8X8_PIN_NONE);
+Adafruit_SHT31   sht31   = Adafruit_SHT31(); 
+
+bool pumpState = false;
+
+#define BTN_UP     18
+#define BTN_DOWN   16
+#define BTN_LEFT   17
+#define BTN_RIGHT  4
+#define BTN_CENTER 5
+
+int currentScreen     = 0; 
+const int totalScreens = 7; // Updated for water sensors + pump
+
+#define TOUCH_PIN1  32
+#define TOUCH_PIN2  33
+#define TOUCH_PIN3  14
+#define TOUCH_PIN4  12
+#define BUZZER_PIN  19
+
+int threshold = 30;  
+int touch1, touch2, touch3, touch4;
+
+/****************** IoT Mode **********************/
+#define AP_SSID       "WATER"
+#define AP_PASSWORD   "12345678"
+bool iotModeActive = false;
+
+AsyncWebServer server(80);
+
+/****************** Function Prototypes ***********/
+void configureBuzzer();
+void playTone(int frequency);
+void stopTone();
+void handleNavigation();
+void updateDisplay();       
+void updateDetailView();   
+void updateWaterLevelView();
+void updateTempView();
+void updateTDSView();
+void updateTurbidityView();
+void updateFlowView();
+void updatePumpControlView();
+void updateMusicModeView();
+void updateIoTModeScreen();
+void showProfessionalBootScreen();
+void drawProgressBar(int x, int y, int width, int height, int percentage);
+void drawStatusIndicator(int x, int y, bool state);
+void drawIcon(int x, int y, const char* icon);
+String readWaterLevelStatus();
+String readTempStatus();
+String readTDSStatus();
+String readTurbidityStatus();
+String readFlowStatus();
+uint8_t readWaterLevelValue();
+uint8_t readTempValue();
+uint8_t readTDSValue();
+uint8_t readTurbidityValue();
+uint8_t readFlowValue();
+void controlPump(bool state);
+void setupWiFiAP();
+void stopWiFiAP();
+String buildJSONData();
+
+/*************************************************
+ *        Professional Dashboard HTML - Blue Theme
+ *************************************************/
+const char dashboard_html[] PROGMEM = R"====(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WATER Monitoring Dashboard</title>
+    <style>
+        :root {
+            --primary-color: #2980B9;
+            --secondary-color: #3498DB;
+            --accent-color: #5DADE2;
+            --danger-color: #E74C3C;
+            --success-color: #27AE60;
+            --warning-color: #F39C12;
+            --dark-color: #1B4F72;
+            --light-color: #EBF5FB;
+            --text-color: #1B4F72;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+        }
+
+        body {
+            background: linear-gradient(135deg, #EBF5FB, #D6EAF8, #AED6F1);
+            color: var(--text-color);
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            padding: 20px;
+            text-align: center;
+            box-shadow: 0 4px 20px rgba(41, 128, 185, 0.3);
+        }
+
+        .header h1 {
+            font-size: clamp(1.8rem, 4vw, 3rem);
+            font-weight: 700;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header .subtitle {
+            font-size: clamp(1rem, 2vw, 1.2rem);
+            opacity: 0.95;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 20px auto;
+            padding: 0 15px;
+        }
+
+        .system-status {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 25px;
+        }
+
+        .status-card {
+            background: linear-gradient(145deg, white, var(--light-color));
+            padding: 15px;
+            border-radius: 12px;
+            text-align: center;
+            box-shadow: 0 4px 15px rgba(41, 128, 185, 0.15);
+            border: 2px solid var(--accent-color);
+            transition: transform 0.3s ease;
+        }
+
+        .status-card:hover {
+            transform: translateY(-3px);
+        }
+
+        .status-value {
+            font-size: clamp(1.2rem, 3vw, 1.6rem);
+            font-weight: 700;
+            color: var(--primary-color);
+            margin-bottom: 5px;
+        }
+
+        .status-label {
+            font-size: clamp(0.8rem, 2vw, 0.9rem);
+            color: var(--dark-color);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+
+        .card {
+            background: linear-gradient(145deg, white, var(--light-color));
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 6px 25px rgba(41, 128, 185, 0.15);
+            border: 2px solid var(--accent-color);
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(41, 128, 185, 0.2);
+        }
+
+        .card-title {
+            font-size: clamp(1.2rem, 3vw, 1.4rem);
+            font-weight: 700;
+            margin-bottom: 20px;
+            color: var(--primary-color);
+            text-align: center;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 2px solid var(--accent-color);
+            padding-bottom: 10px;
+        }
+
+        .sensor-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .sensor-item {
+            background: linear-gradient(145deg, #FDFEFE, #EBF5FB);
+            padding: 15px;
+            border-radius: 12px;
+            text-align: center;
+            border: 2px solid var(--accent-color);
+            transition: all 0.3s ease;
+            box-shadow: 0 3px 10px rgba(41, 128, 185, 0.1);
+        }
+
+        .sensor-item:hover {
+            transform: scale(1.02);
+            box-shadow: 0 5px 15px rgba(41, 128, 185, 0.2);
+        }
+
+        .sensor-label {
+            font-size: clamp(0.8rem, 2vw, 0.9rem);
+            font-weight: 600;
+            color: var(--dark-color);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+
+        .sensor-value {
+            font-size: clamp(1.4rem, 4vw, 1.8rem);
+            font-weight: 700;
+            color: var(--primary-color);
+            margin: 10px 0;
+        }
+
+        .gauge-container {
+            position: relative;
+            width: 120px;
+            height: 120px;
+            margin: 10px auto;
+        }
+
+        .gauge-circle {
+            width: 100%;
+            height: 100%;
+            border-radius: 50%;
+            background: conic-gradient(
+                from 0deg,
+                var(--danger-color) 0%,
+                var(--warning-color) 25%,
+                var(--accent-color) 50%,
+                var(--secondary-color) 75%,
+                var(--primary-color) 100%
+            );
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+        }
+
+        .gauge-circle::before {
+            content: '';
+            position: absolute;
+            width: 90px;
+            height: 90px;
+            background: white;
+            border-radius: 50%;
+            box-shadow: inset 0 0 10px rgba(0,0,0,0.1);
+        }
+
+        .gauge-text {
+            position: absolute;
+            font-size: clamp(1rem, 3vw, 1.2rem);
+            font-weight: 700;
+            color: var(--primary-color);
+            z-index: 10;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-on { 
+            background-color: var(--success-color);
+            animation: blink 1s infinite;
+        }
+        .status-off { 
+            background-color: #95A5A6; 
+        }
+
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0.6; }
+        }
+
+        .alert {
+            background: linear-gradient(145deg, var(--danger-color), #C0392B) !important;
+            color: white !important;
+            animation: alertPulse 1s infinite;
+        }
+
+        .safe {
+            background: linear-gradient(145deg, var(--success-color), #229954) !important;
+            color: white !important;
+        }
+
+        .warning {
+            background: linear-gradient(145deg, var(--warning-color), #E74C3C) !important;
+            color: white !important;
+        }
+
+        @keyframes alertPulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+
+        .footer {
+            background: linear-gradient(135deg, var(--dark-color), #1B4F72);
+            color: white;
+            text-align: center;
+            padding: 20px;
+            margin-top: 30px;
+        }
+
+        .footer h3 {
+            font-size: clamp(1.2rem, 3vw, 1.4rem);
+            margin-bottom: 5px;
+        }
+
+        .footer p {
+            font-size: clamp(0.9rem, 2vw, 1rem);
+        }
+
+        .control-section {
+            text-align: center;
+        }
+
+        .control-btn {
+            background: linear-gradient(145deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            border: none;
+            padding: 15px 25px;
+            border-radius: 25px;
+            font-size: clamp(1rem, 2.5vw, 1.1rem);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            box-shadow: 0 4px 15px rgba(41, 128, 185, 0.3);
+            min-width: 200px;
+            width: 100%;
+            max-width: 300px;
+            margin: 0 auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .control-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(41, 128, 185, 0.4);
+        }
+
+        .control-btn.active {
+            background: linear-gradient(145deg, var(--success-color), #229954);
+        }
+
+        /* Mobile Responsiveness */
+        @media (max-width: 768px) {
+            .container {
+                padding: 0 10px;
+            }
+            
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+                gap: 15px;
+            }
+            
+            .sensor-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .system-status {
+                grid-template-columns: 1fr;
+            }
+            
+            .gauge-container {
+                width: 100px;
+                height: 100px;
+            }
+            
+            .gauge-circle::before {
+                width: 80px;
+                height: 80px;
+            }
+            
+            .control-btn {
+                min-width: 150px;
+                padding: 12px 20px;
+                font-size: 1rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .system-status {
+                grid-template-columns: 1fr;
+            }
+            
+            .sensor-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .header {
+                padding: 15px;
+            }
+            
+            .control-btn {
+                min-width: 120px;
+                padding: 10px 15px;
+                font-size: 0.9rem;
+            }
+        }
+
+        /* Desktop/Laptop specific optimizations */
+        @media (min-width: 1024px) {
+            .control-btn {
+                min-width: 250px;
+                max-width: 350px;
+                padding: 18px 30px;
+                font-size: 1.2rem;
+            }
+            
+            .dashboard-grid {
+                grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            }
+        }
+
+        @media (min-width: 1440px) {
+            .control-btn {
+                min-width: 280px;
+                max-width: 400px;
+                padding: 20px 35px;
+                font-size: 1.3rem;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>💧 WATER Dashboard</h1>
+        <div class="subtitle">Water Quality Monitoring & Control System</div>
+    </div>
+    
+    <div class="container">
+        <div class="system-status">
+            <div class="status-card">
+                <div class="status-value" id="systemTime">--:--:--</div>
+                <div class="status-label">System Time</div>
+            </div>
+            <div class="status-card">
+                <div class="status-value" id="connectionStatus">Connecting...</div>
+                <div class="status-label">Connection</div>
+            </div>
+            <div class="status-card">
+                <div class="status-value" id="lastUpdate">Never</div>
+                <div class="status-label">Last Update</div>
+            </div>
+            <div class="status-card">
+                <div class="status-value" id="deviceCount">0</div>
+                <div class="status-label">Active Devices</div>
+            </div>
+        </div>
+
+        <div class="dashboard-grid">
+            <div class="card">
+                <h2 class="card-title">System Controls</h2>
+                <div class="control-section">
+                    <button class="control-btn" id="pumpBtn" onclick="togglePump()">
+                        <span class="status-indicator status-off"></span>
+                        Pump: OFF
+                    </button>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h2 class="card-title">Water Quality Sensors</h2>
+                <div class="sensor-grid">
+                    <div class="sensor-item">
+                        <div class="sensor-label">Water Level</div>
+                        <div class="gauge-container">
+                            <div class="gauge-circle">
+                                <div class="gauge-text" id="waterLevelGauge">--</div>
+                            </div>
+                        </div>
+                        <div style="font-size: 0.9em; margin-top: 5px;" id="waterLevelStatus">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-label">Temperature</div>
+                        <div class="gauge-container">
+                            <div class="gauge-circle">
+                                <div class="gauge-text" id="tempGauge">--°C</div>
+                            </div>
+                        </div>
+                        <div style="font-size: 0.9em; margin-top: 5px;" id="tempStatus">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-label">TDS</div>
+                        <div class="gauge-container">
+                            <div class="gauge-circle">
+                                <div class="gauge-text" id="tdsGauge">--</div>
+                            </div>
+                        </div>
+                        <div style="font-size: 0.9em; margin-top: 5px;" id="tdsStatus">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-label">Turbidity</div>
+                        <div class="sensor-value" id="turbidityValue">--</div>
+                        <div style="font-size: 0.9em; margin-top: 5px;" id="turbidityStatus">--</div>
+                    </div>
+                    <div class="sensor-item">
+                        <div class="sensor-label">Flow Rate</div>
+                        <div class="sensor-value" id="flowValue">--</div>
+                        <div style="font-size: 0.9em; margin-top: 5px;" id="flowStatus">--</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="footer">
+        <h3>WATER Quality Monitoring System</h3>
+        <p>Smart Water Management Solutions &copy; 2024</p>
+    </div>
+
+    <script>
+        let isConnected = false;
+        let updateCount = 0;
+
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('systemTime').textContent = now.toLocaleTimeString();
+        }
+
+        function updateSensorCard(id, status) {
+            const card = document.getElementById(id);
+            if (!card) return;
+            
+            card.classList.remove('alert', 'safe', 'warning');
+            
+            if (status === "Low" || status === "Poor" || status === "High") {
+                card.classList.add('alert');
+            } else if (status === "Good" || status === "Normal" || status === "Clear") {
+                card.classList.add('safe');
+            } else if (status === "Error") {
+                card.classList.add('warning');
+            }
+        }
+
+        function togglePump() {
+            fetch('/togglePump')
+                .then(response => {
+                    if (!response.ok) throw new Error('Network response was not ok');
+                    return response.json();
+                })
+                .then(data => {
+                    const btn = document.getElementById("pumpBtn");
+                    if (data.pump == 1 || data.pump === true) {
+                        btn.innerHTML = '<span class="status-indicator status-on"></span>Pump: ON';
+                        btn.classList.add('active');
+                    } else {
+                        btn.innerHTML = '<span class="status-indicator status-off"></span>Pump: OFF';
+                        btn.classList.remove('active');
+                    }
+                    console.log('Pump toggled:', data.pump);
+                })
+                .catch(error => {
+                    console.error('Error toggling pump:', error);
+                    document.getElementById('connectionStatus').textContent = 'Error';
+                    isConnected = false;
+                });
+        }
+
+        function updateData() {
+            fetch('/data')
+                .then(response => {
+                    if (!response.ok) throw new Error('Network response was not ok');
+                    return response.json();
+                })
+                .then(data => {
+                    console.log('Received data:', data);
+                    updateCount++;
+                    
+                    // Update water sensors
+                    const waterLevel = data.waterLevelValue || 0;
+                    const temp = data.tempValue || 0;
+                    const tds = data.tdsValue || 0;
+                    
+                    document.getElementById("waterLevelGauge").textContent = waterLevel;
+                    document.getElementById("waterLevelStatus").textContent = data.waterLevelStatus || "--";
+                    document.getElementById("tempGauge").textContent = temp + "°C";
+                    document.getElementById("tempStatus").textContent = data.tempStatus || "--";
+                    document.getElementById("tdsGauge").textContent = tds;
+                    document.getElementById("tdsStatus").textContent = data.tdsStatus || "--";
+                    document.getElementById("turbidityValue").textContent = data.turbidityValue || "--";
+                    document.getElementById("turbidityStatus").textContent = data.turbidityStatus || "--";
+                    document.getElementById("flowValue").textContent = data.flowValue || "--";
+                    document.getElementById("flowStatus").textContent = data.flowStatus || "--";
+                    
+                    // Update pump control button
+                    const pumpBtn = document.getElementById("pumpBtn");
+                    if (data.pump == 1 || data.pump === true || data.pump === "true") {
+                        pumpBtn.innerHTML = '<span class="status-indicator status-on"></span>Pump: ON';
+                        pumpBtn.classList.add('active');
+                    } else {
+                        pumpBtn.innerHTML = '<span class="status-indicator status-off"></span>Pump: OFF';
+                        pumpBtn.classList.remove('active');
+                    }
+                    
+                    // Update connection status
+                    document.getElementById('connectionStatus').textContent = 'Connected';
+                    document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+                    document.getElementById('deviceCount').textContent = updateCount;
+                    isConnected = true;
+                })
+                .catch(error => {
+                    console.error('Error fetching data:', error);
+                    document.getElementById('connectionStatus').textContent = 'Error';
+                    isConnected = false;
+                });
+        }
+
+        // Initialize
+        updateTime();
+        
+        // Initial data fetch
+        setTimeout(updateData, 1000);
+        
+        // Auto-update intervals
+        setInterval(updateTime, 1000);
+        setInterval(updateData, 3000); // Every 3 seconds for more reliable updates
+    </script>
+</body>
+</html>
+)====";
+
+/*************************************************
+ *   JSON Data Builder - Updated for WATER sensors
+ *************************************************/
+String buildJSONData() {
+  String waterLevelStatus = readWaterLevelStatus();
+  uint8_t waterLevelValue = readWaterLevelValue();
+  String tempStatus = readTempStatus();
+  uint8_t tempValue = readTempValue();
+  String tdsStatus = readTDSStatus();
+  uint8_t tdsValue = readTDSValue();
+  String turbidityStatus = readTurbidityStatus();
+  uint8_t turbidityValue = readTurbidityValue();
+  String flowStatus = readFlowStatus();
+  uint8_t flowValue = readFlowValue();
+
+  String json = "{";
+  json += "\"waterLevelStatus\":\"" + waterLevelStatus + "\",";
+  json += "\"waterLevelValue\":" + String(waterLevelValue) + ",";
+  json += "\"tempStatus\":\"" + tempStatus + "\",";
+  json += "\"tempValue\":" + String(tempValue) + ",";
+  json += "\"tdsStatus\":\"" + tdsStatus + "\",";
+  json += "\"tdsValue\":" + String(tdsValue) + ",";
+  json += "\"turbidityStatus\":\"" + turbidityStatus + "\",";
+  json += "\"turbidityValue\":" + String(turbidityValue) + ",";
+  json += "\"flowStatus\":\"" + flowStatus + "\",";
+  json += "\"flowValue\":" + String(flowValue) + ",";
+  json += "\"pump\":" + String(pumpState ? 1 : 0);
+  json += "}";
+
+  Serial.println("JSON Output: " + json);
+  return json;
+}
+
+/*************************************************
+ *        Setup & Main Loop
+ *************************************************/
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
+
+  // Initialize U8g2
+  u8g2.begin();
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.sendBuffer();
+
+  showProfessionalBootScreen();
+  
+  if (!sht31.begin(0x45)) {
+    Serial.println("SHT31 not found. Check wiring!");
+  } else {
+    Serial.println("SHT31 Sensor initialized successfully.");
+  }
+
+  pinMode(BTN_UP,     INPUT_PULLUP);
+  pinMode(BTN_DOWN,   INPUT_PULLUP);
+  pinMode(BTN_LEFT,   INPUT_PULLUP);
+  pinMode(BTN_RIGHT,  INPUT_PULLUP);
+  pinMode(BTN_CENTER, INPUT_PULLUP);
+
+  touchAttachInterrupt(TOUCH_PIN1, NULL, threshold);
+  touchAttachInterrupt(TOUCH_PIN2, NULL, threshold);
+  touchAttachInterrupt(TOUCH_PIN3, NULL, threshold);
+  touchAttachInterrupt(TOUCH_PIN4, NULL, threshold);
+
+  configureBuzzer();
+  updateDisplay();
+
+  setupWiFiAP();
+
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", dashboard_html);
+  });
+
+  server.on("/data", HTTP_GET, [](AsyncWebServerRequest *request){
+    String json = buildJSONData();
+    request->send(200, "application/json", json);
+  });
+
+  server.on("/togglePump", HTTP_GET, [](AsyncWebServerRequest *request){
+    pumpState = !pumpState;
+    controlPump(pumpState);
+    String resp = "{\"pump\":" + String(pumpState ? 1 : 0) + "}";
+    request->send(200, "application/json", resp);
+  });
+
+  server.begin();
+  Serial.println("WATER Quality Monitoring System Ready.");
+}
+
+void loop() {
+  handleNavigation();
+
+  switch (currentScreen) {
+    case 0:  
+      updateDisplay();
+      break;
+    case 1:
+      updateWaterLevelView();
+      break;
+    case 2:
+      updateTempView();
+      break;
+    case 3:
+      updateTDSView();
+      break;
+    case 4:
+      updateTurbidityView();
+      break;
+    case 5:
+      updateFlowView();
+      break;
+    case 6:
+      updatePumpControlView();
+      break;
+    case 7:
+      updateMusicModeView();
+      break;
+    case 8:
+      updateIoTModeScreen();
+      break;
+    default:
+      currentScreen = 0;
+      updateDisplay();
+      break;
+  }
+}
+
+/*************************************************
+ *        Navigation Handler
+ *************************************************/
+void handleNavigation() {
+  if (currentScreen != 7 && currentScreen != 8) {
+    if (digitalRead(BTN_UP) == LOW) {
+      currentScreen = (currentScreen - 1 + 7) % 7;
+      delay(200); 
+    }
+    if (digitalRead(BTN_DOWN) == LOW) {
+      currentScreen = (currentScreen + 1) % 7;
+      delay(200); 
+    }
+  }
+
+  // Music Mode - LEFT to enter, RIGHT to exit
+  if (currentScreen == 0 && digitalRead(BTN_LEFT) == LOW) {
+    currentScreen = 7;
+    delay(200);
+  }
+  if (currentScreen == 7 && digitalRead(BTN_RIGHT) == LOW) {
+    currentScreen = 0;
+    delay(200);
+  }
+
+  // IoT Mode - RIGHT to enter, LEFT to exit  
+  if (currentScreen == 0 && digitalRead(BTN_RIGHT) == LOW && !iotModeActive) {
+    iotModeActive = true;
+    currentScreen = 8;
+    delay(200);
+  }
+  if (currentScreen == 8 && digitalRead(BTN_LEFT) == LOW) {
+    stopWiFiAP();
+    iotModeActive = false;
+    currentScreen = 0;
+    delay(200);
+  }
+
+  if (digitalRead(BTN_CENTER) == LOW) {
+    if (currentScreen == 6) { // Pump control screen
+      pumpState = !pumpState;
+      controlPump(pumpState);
+      delay(300);
+    }
+  }
+}
+
+/*************************************************
+ *        Enhanced Professional Boot Screen
+ *************************************************/
+void showProfessionalBootScreen() {
+  // Phase 1: Animated Logo with better effects
+  for (int frame = 0; frame < 25; frame++) {
+    u8g2.clearBuffer();
+    
+    // Animated border with pulsing effect
+    if (frame > 3) {
+      int borderSize = 2 + (frame % 4);
+      u8g2.drawRFrame(10, 8, 108, 48, 5);
+      if (frame > 8) {
+        u8g2.drawRFrame(12, 10, 104, 44, 3);
+      }
+    }
+    
+    // Company name with sliding animation
+    if (frame > 6) {
+      u8g2.setFont(u8g2_font_ncenB14_tr);
+      int textX = max(25, 150 - frame * 8);
+      u8g2.drawStr(textX, 32, "WATER");
+    }
+    
+    // Version info with fade-in effect
+    if (frame > 15) {
+      u8g2.setFont(u8g2_font_6x10_tr);
+      u8g2.drawStr(30, 45, "QUALITY");
+    }
+    
+    // Loading dots animation
+    if (frame > 10) {
+      for (int i = 0; i < 3; i++) {
+        if ((frame + i * 3) % 9 < 6) {
+          u8g2.drawDisc(45 + i * 10, 50, 1);
+        }
+      }
+    }
+    
+    u8g2.sendBuffer();
+    delay(80);
+  }
+  
+  // Phase 2: Enhanced Loading sequence
+  const char* loadSteps[] = {
+    "Initializing Core...",
+    "Loading Sensors...", 
+    "Configuring Water...",
+    "Starting Services...",
+    "System Ready!"
+  };
+  
+  for (int step = 0; step < 5; step++) {
+    u8g2.clearBuffer();
+    
+    // Centered header
+    u8g2.setFont(u8g2_font_ncenB10_tr);
+    u8g2.drawStr(35, 15, "WATER");
+    
+    // Loading text - centered
+    u8g2.setFont(u8g2_font_6x10_tr);
+    int textWidth = strlen(loadSteps[step]) * 6;
+    int textX = (128 - textWidth) / 2;
+    u8g2.drawStr(textX, 32, loadSteps[step]);
+    
+    // Enhanced progress bar with animation
+    int progress = ((step + 1) * 100) / 5;
+    u8g2.drawRFrame(14, 42, 100, 10, 2);
+    u8g2.drawBox(16, 44, (progress * 96) / 100, 6);
+    
+    // Animated progress indicator
+    int indicatorX = 16 + (progress * 96) / 100;
+    if (step < 4) {
+      u8g2.drawDisc(indicatorX, 47, 2);
+    }
+    
+    // Centered percentage
+    u8g2.setCursor(58, 60);
+    u8g2.print(progress);
+    u8g2.print("%");
+    
+    u8g2.sendBuffer();
+    delay(700);
+  }
+  
+  delay(500);
+}
+
+/*************************************************
+ *        Improved Main Display
+ *************************************************/
+void updateDisplay() {
+  String waterLevelStatus = readWaterLevelStatus();
+  String tempStatus = readTempStatus();
+  String tdsStatus = readTDSStatus();
+  String turbidityStatus = readTurbidityStatus();
+  String flowStatus = readFlowStatus();
+
+  // Removed buzzer alerts from main display
+
+  u8g2.clearBuffer();
+
+  // Water sensors grid
+  // Water Level - Top Left
+  u8g2.drawRFrame(3, 2, 58, 19, 2);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(6, 9, "LEVEL");
+  u8g2.setFont(u8g2_font_6x10_tr);
+  int waterLevelX = 6 + (52 - waterLevelStatus.length() * 6) / 2;
+  u8g2.drawStr(waterLevelX, 18, waterLevelStatus.c_str());
+  
+  // Temperature - Top Right
+  u8g2.drawRFrame(67, 2, 58, 19, 2);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(70, 9, "TEMP");
+  u8g2.setFont(u8g2_font_6x10_tr);
+  int tempX = 70 + (52 - tempStatus.length() * 6) / 2;
+  u8g2.drawStr(tempX, 18, tempStatus.c_str());
+  
+  // TDS - Middle Left
+  u8g2.drawRFrame(3, 24, 58, 19, 2);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(6, 31, "TDS");
+  u8g2.setFont(u8g2_font_6x10_tr);
+  int tdsX = 6 + (52 - tdsStatus.length() * 6) / 2;
+  u8g2.drawStr(tdsX, 40, tdsStatus.c_str());
+  
+  // Turbidity - Middle Right
+  u8g2.drawRFrame(67, 24, 58, 19, 2);
+  u8g2.setFont(u8g2_font_5x7_tr);
+  u8g2.drawStr(70, 31, "TURB");
+  u8g2.setFont(u8g2_font_6x10_tr);
+  int turbX = 70 + (52 - turbidityStatus.length() * 6) / 2;
+  u8g2.drawStr(turbX, 40, turbidityStatus.c_str());
+  
+  // Navigation bar with better visibility
+  u8g2.drawHLine(0, 47, 128);
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(5, 56, "UP:DET");
+  u8g2.drawStr(45, 56, "L:MUS");
+  u8g2.drawStr(90, 56, "R:IoT");
+  
+  u8g2.sendBuffer();
+}
+
+/*************************************************
+ *        Water Sensor Views
+ *************************************************/
+void updateWaterLevelView() {
+  String waterLevelStatus = readWaterLevelStatus();
+  uint8_t waterLevelValue = readWaterLevelValue();
+  
+  u8g2.clearBuffer();
+  
+  // Centered header
+  u8g2.drawBox(0, 0, 128, 12);
+  u8g2.setColorIndex(0);
+  u8g2.setFont(u8g2_font_7x13B_tr);
+  u8g2.drawStr(20, 9, "WATER LEVEL");
+  u8g2.setColorIndex(1);
+  
+  // Main display - centered
+  u8g2.drawRFrame(15, 14, 98, 32, 4);
+  
+  // Water level reading - centered and prominent
+  u8g2.setFont(u8g2_font_ncenB14_tr);
+  String readingText = String(waterLevelValue);
+  int readingX = 19 + (90 - readingText.length() * 14) / 2;
+  u8g2.drawStr(readingX, 28, readingText.c_str());
+  
+  // Water level status - centered
+  u8g2.setFont(u8g2_font_6x10_tr);
+  String statusText = "Status: " + waterLevelStatus;
+  int statusX = 19 + (90 - statusText.length() * 6) / 2;
+  u8g2.drawStr(statusX, 38, statusText.c_str());
+  
+  // Enhanced water level bar
+  u8g2.drawFrame(15, 50, 98, 8);
+  int barWidth = map(waterLevelValue, 0, 255, 0, 96);
+  u8g2.drawBox(16, 51, barWidth, 6);
+  
+  // Water animation based on level
+  if (waterLevelValue > 100) {
+    for (int i = 0; i < 3; i++) {
+      int waveY = 20 + 2 * sin((millis() / 200.0) + i);
+      u8g2.drawHLine(95 + i * 3, waveY, 3);
+    }
+  }
+  
+  // Centered reading label
+  u8g2.setFont(u8g2_font_micro_tr);
+  String readingLabel = "Level: " + String(waterLevelValue);
+  int labelX = (128 - readingLabel.length() * 4) / 2;
+  u8g2.drawStr(labelX, 63, readingLabel.c_str());
+  
+  u8g2.sendBuffer();
+}
+
+void updateTempView() {
+  String tempStatus = readTempStatus();
+  uint8_t tempValue = readTempValue();
+  
+  u8g2.clearBuffer();
+  
+  // Centered header
+  u8g2.drawBox(0, 0, 128, 12);
+  u8g2.setColorIndex(0);
+  u8g2.setFont(u8g2_font_7x13B_tr);
+  u8g2.drawStr(20, 9, "TEMPERATURE");
+  u8g2.setColorIndex(1);
+  
+  // Main display - centered
+  u8g2.drawRFrame(20, 16, 88, 30, 4);
+  
+  // Temperature value - properly centered
+  u8g2.setFont(u8g2_font_ncenB14_tr);
+  String tempText = String(tempValue) + "C";
+  int textWidth = tempText.length() * 10;
+  int tempX = 20 + (88 - textWidth) / 2;
+  u8g2.drawStr(tempX, 35, tempText.c_str());
+  
+  // Animated thermometer bar
+  int tempLevel = map(constrain(tempValue, 0, 50), 0, 50, 0, 20);
+  u8g2.drawFrame(25, 20, 4, 22);
+  u8g2.drawBox(26, 41 - tempLevel, 2, tempLevel);
+  u8g2.drawDisc(27, 42, 2);
+  
+  // Status classification - centered
+  u8g2.setFont(u8g2_font_6x10_tr);
+  String status = "Status: " + tempStatus;
+  int statusX = (128 - status.length() * 6) / 2;
+  u8g2.drawStr(statusX, 55, status.c_str());
+  
+  u8g2.sendBuffer();
+}
+
+void updateTDSView() {
+  String tdsStatus = readTDSStatus();
+  uint8_t tdsValue = readTDSValue();
+  
+  u8g2.clearBuffer();
+  
+  // Centered header
+  u8g2.drawBox(0, 0, 128, 12);
+  u8g2.setColorIndex(0);
+  u8g2.setFont(u8g2_font_7x13B_tr);
+  u8g2.drawStr(45, 9, "TDS");
+  u8g2.setColorIndex(1);
+  
+  // Main display - centered
+  u8g2.drawRFrame(15, 14, 98, 32, 4);
+  
+  // TDS reading - centered and prominent
+  u8g2.setFont(u8g2_font_ncenB14_tr);
+  String readingText = String(tdsValue);
+  int readingX = 19 + (90 - readingText.length() * 14) / 2;
+  u8g2.drawStr(readingX, 28, readingText.c_str());
+  
+  // TDS status - centered
+  u8g2.setFont(u8g2_font_6x10_tr);
+  String statusText = "Status: " + tdsStatus;
+  int statusX = 19 + (90 - statusText.length() * 6) / 2;
+  u8g2.drawStr(statusX, 38, statusText.c_str());
+  
+  // Enhanced TDS level bar
+  u8g2.drawFrame(15, 50, 98, 8);
+  int barWidth = map(tdsValue, 0, 255, 0, 96);
+  u8g2.drawBox(16, 51, barWidth, 6);
+  
+  // Centered reading label
+  u8g2.setFont(u8g2_font_micro_tr);
+  String readingLabel = "TDS: " + String(tdsValue);
+  int labelX = (128 - readingLabel.length() * 4) / 2;
+  u8g2.drawStr(labelX, 63, readingLabel.c_str());
+  
+  u8g2.sendBuffer();
+}
+
+void updateTurbidityView() {
+  String turbidityStatus = readTurbidityStatus();
+  uint8_t turbidityValue = readTurbidityValue();
+  
+  u8g2.clearBuffer();
+  
+  // Centered header
+  u8g2.drawBox(0, 0, 128, 12);
+  u8g2.setColorIndex(0);
+  u8g2.setFont(u8g2_font_7x13B_tr);
+  u8g2.drawStr(30, 9, "TURBIDITY");
+  u8g2.setColorIndex(1);
+  
+  // Main display - centered
+  u8g2.drawRFrame(15, 14, 98, 32, 4);
+  
+  // Turbidity reading - centered and prominent
+  u8g2.setFont(u8g2_font_ncenB14_tr);
+  String readingText = String(turbidityValue);
+  int readingX = 19 + (90 - readingText.length() * 14) / 2;
+  u8g2.drawStr(readingX, 28, readingText.c_str());
+  
+  // Turbidity status - centered
+  u8g2.setFont(u8g2_font_6x10_tr);
+  String statusText = "Status: " + turbidityStatus;
+  int statusX = 19 + (90 - statusText.length() * 6) / 2;
+  u8g2.drawStr(statusX, 38, statusText.c_str());
+  
+  // Enhanced turbidity level bar
+  u8g2.drawFrame(15, 50, 98, 8);
+  int barWidth = map(turbidityValue, 0, 255, 0, 96);
+  u8g2.drawBox(16, 51, barWidth, 6);
+  
+  // Centered reading label
+  u8g2.setFont(u8g2_font_micro_tr);
+  String readingLabel = "Turbidity: " + String(turbidityValue);
+  int labelX = (128 - readingLabel.length() * 4) / 2;
+  u8g2.drawStr(labelX, 63, readingLabel.c_str());
+  
+  u8g2.sendBuffer();
+}
+
+void updateFlowView() {
+  String flowStatus = readFlowStatus();
+  uint8_t flowValue = readFlowValue();
+  
+  u8g2.clearBuffer();
+  
+  // Centered header
+  u8g2.drawBox(0, 0, 128, 12);
+  u8g2.setColorIndex(0);
+  u8g2.setFont(u8g2_font_7x13B_tr);
+  u8g2.drawStr(30, 9, "FLOW RATE");
+  u8g2.setColorIndex(1);
+  
+  // Main display - centered
+  u8g2.drawRFrame(15, 14, 98, 32, 4);
+  
+  // Flow reading - centered and prominent
+  u8g2.setFont(u8g2_font_ncenB14_tr);
+  String readingText = String(flowValue);
+  int readingX = 19 + (90 - readingText.length() * 14) / 2;
+  u8g2.drawStr(readingX, 28, readingText.c_str());
+  
+  // Flow status - centered
+  u8g2.setFont(u8g2_font_6x10_tr);
+  String statusText = "Status: " + flowStatus;
+  int statusX = 19 + (90 - statusText.length() * 6) / 2;
+  u8g2.drawStr(statusX, 38, statusText.c_str());
+  
+  // Enhanced flow level bar
+  u8g2.drawFrame(15, 50, 98, 8);
+  int barWidth = map(flowValue, 0, 255, 0, 96);
+  u8g2.drawBox(16, 51, barWidth, 6);
+  
+  // Flow animation
+  if (flowValue > 50) {
+    for (int i = 0; i < 4; i++) {
+      int arrowX = 100 + (millis() / 100 + i * 5) % 15;
+      if (arrowX < 110) {
+        u8g2.drawPixel(arrowX, 25);
+        u8g2.drawPixel(arrowX + 1, 24);
+        u8g2.drawPixel(arrowX + 1, 26);
+      }
+    }
+  }
+  
+  // Centered reading label
+  u8g2.setFont(u8g2_font_micro_tr);
+  String readingLabel = "Flow: " + String(flowValue);
+  int labelX = (128 - readingLabel.length() * 4) / 2;
+  u8g2.drawStr(labelX, 63, readingLabel.c_str());
+  
+  u8g2.sendBuffer();
+}
+
+void updatePumpControlView() {
+  u8g2.clearBuffer();
+  
+  // Centered header
+  u8g2.drawBox(0, 0, 128, 12);
+  u8g2.setColorIndex(0);
+  u8g2.setFont(u8g2_font_7x13B_tr);
+  u8g2.drawStr(20, 9, "PUMP CONTROL");
+  u8g2.setColorIndex(1);
+  
+  // Main control area - centered
+  u8g2.drawRFrame(20, 16, 88, 32, 4);
+  
+  // Status display - centered
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(45, 25, "Status:");
+  u8g2.setFont(u8g2_font_ncenB14_tr);
+  String statusText = pumpState ? "ON" : "OFF";
+  int statusX = 24 + (80 - statusText.length() * 14) / 2;
+  u8g2.drawStr(statusX, 40, statusText.c_str());
+  
+  // Enhanced visual indicator with animation
+  if (pumpState) {
+    if ((millis() / 300) % 2) {
+      u8g2.drawDisc(90, 32, 4);
+    }
+    u8g2.drawCircle(90, 32, 6);
+    u8g2.drawCircle(90, 32, 8);
+  } else {
+    u8g2.drawCircle(90, 32, 4);
+  }
+  
+  // Centered control instruction
+  u8g2.drawBox(0, 52, 128, 12);
+  u8g2.setColorIndex(0);
+  u8g2.setFont(u8g2_font_6x10_tr);
+  String instruction = "PRESS CENTER TO TOGGLE";
+  int instrX = (128 - instruction.length() * 6) / 2;
+  u8g2.drawStr(instrX, 60, instruction.c_str());
+  u8g2.setColorIndex(1);
+  
+  u8g2.sendBuffer();
+}
+
+/*************************************************
+ *        IoT Mode Dashboard
+ *************************************************/
+void updateIoTModeScreen() {
+  u8g2.clearBuffer();
+  
+  // Header
+  u8g2.drawBox(0, 0, 128, 12);
+  u8g2.setColorIndex(0);
+  u8g2.setFont(u8g2_font_7x13B_tr);
+  u8g2.drawStr(25, 10, "IoT DASHBOARD");
+  u8g2.setColorIndex(1);
+  
+  // Info box
+  u8g2.drawRFrame(5, 16, 118, 36, 3);
+  
+  u8g2.setFont(u8g2_font_6x10_tr);
+  u8g2.drawStr(10, 25, "SSID: ");
+  u8g2.drawStr(40, 25, AP_SSID);
+  
+  u8g2.drawStr(10, 33, "Pass: ");
+  u8g2.drawStr(40, 33, AP_PASSWORD);
+  
+  u8g2.drawStr(10, 41, "IP: ");
+  IPAddress IP = WiFi.softAPIP();
+  u8g2.setCursor(30, 41);
+  u8g2.print(IP);
+  
+  u8g2.drawStr(10, 49, "Connected: ");
+  int clients = WiFi.softAPgetStationNum();
+  u8g2.setCursor(70, 49);
+  u8g2.print(clients);
+  u8g2.print(" device");
+  if (clients != 1) u8g2.print("s");
+  
+  // Connection status indicator
+  if (clients > 0) {
+    u8g2.drawDisc(100, 25, 3);
+  }
+  
+  // Exit instruction
+  u8g2.setFont(u8g2_font_micro_tr);
+  u8g2.drawStr(10, 63, "LEFT: EXIT");
+  
+  u8g2.sendBuffer();
+}
+
+/*************************************************
+ *        Control Functions
+ *************************************************/
+void controlPump(bool state) {
+  Wire.beginTransmission(PUMP_ADDRESS);
+  Wire.write(state ? 1 : 0); 
+  Wire.endTransmission();
+}
+
+/*************************************************
+ *          Audio Functions
+ *************************************************/
+void configureBuzzer() {
+  pinMode(BUZZER_PIN, OUTPUT); 
+  digitalWrite(BUZZER_PIN, LOW);
+}
+
+void playTone(int frequency) {
+  tone(BUZZER_PIN, frequency, 500);
+}
+
+void stopTone() {
+  noTone(BUZZER_PIN);
+}
+
+/*************************************************
+ *            Water Sensor Reading Functions
+ *************************************************/
+String readWaterLevelStatus() {
+  uint8_t value = readWaterLevelValue();
+  if (value < 50) return "Low";
+  else if (value < 150) return "Medium";
+  else return "High";
+}
+
+uint8_t readWaterLevelValue() {
+  Wire.beginTransmission(WATER_LEVEL_ADDRESS);
+  Wire.write(COMMAND_REQUEST_DATA);
+  Wire.endTransmission();
+  delay(10);
+  
+  Wire.requestFrom(WATER_LEVEL_ADDRESS, 1);
+  if (Wire.available() == 1) {
+    return Wire.read();
+  }
+  return 0;
+}
+
+String readTempStatus() {
+  uint8_t value = readTempValue();
+  if (value < 15) return "Cold";
+  else if (value < 25) return "Normal";
+  else if (value < 35) return "Warm";
+  else return "Hot";
+}
+
+uint8_t readTempValue() {
+  Wire.beginTransmission(TEMP_SENSOR_ADDRESS);
+  Wire.write(COMMAND_REQUEST_DATA);
+  Wire.endTransmission();
+  delay(10);
+  
+  Wire.requestFrom(TEMP_SENSOR_ADDRESS, 1);
+  if (Wire.available() == 1) {
+    return Wire.read();
+  }
+  return 0;
+}
+
+String readTDSStatus() {
+  uint8_t value = readTDSValue();
+  if (value < 50) return "Poor";
+  else if (value < 150) return "Good";
+  else return "High";
+}
+
+uint8_t readTDSValue() {
+  Wire.beginTransmission(TDS_SENSOR_ADDRESS);
+  Wire.write(COMMAND_REQUEST_DATA);
+  Wire.endTransmission();
+  delay(10);
+  
+  Wire.requestFrom(TDS_SENSOR_ADDRESS, 1);
+  if (Wire.available() == 1) {
+    return Wire.read();
+  }
+  return 0;
+}
+
+String readTurbidityStatus() {
+  uint8_t value = readTurbidityValue();
+  if (value < 50) return "Clear";
+  else if (value < 150) return "Moderate";
+  else return "Cloudy";
+}
+
+uint8_t readTurbidityValue() {
+  Wire.beginTransmission(TURBIDITY_ADDRESS);
+  Wire.write(COMMAND_REQUEST_DATA);
+  Wire.endTransmission();
+  delay(10);
+  
+  Wire.requestFrom(TURBIDITY_ADDRESS, 1);
+  if (Wire.available() == 1) {
+    return Wire.read();
+  }
+  return 0;
+}
+
+String readFlowStatus() {
+  uint8_t value = readFlowValue();
+  if (value < 50) return "Low";
+  else if (value < 150) return "Normal";
+  else return "High";
+}
+
+uint8_t readFlowValue() {
+  // Send command to request flow data
+  Wire.beginTransmission(FLOW_SENSOR_ADDRESS);
+  Wire.write(FLOW_COMMAND);
+  if (Wire.endTransmission() != 0) {
+    Serial.println("Flow sensor communication error");
+    return 0;
+  }
+  
+  delay(20); // Give sensor time to process
+  
+  // Request 2 bytes for flow data (high byte, low byte)
+  Wire.requestFrom(FLOW_SENSOR_ADDRESS, 2);
+  
+  if (Wire.available() >= 2) {
+    uint8_t highByte = Wire.read();
+    uint8_t lowByte = Wire.read();
+    uint16_t flowReading = (highByte << 8) | lowByte;
+    
+    // Scale down to 8-bit for compatibility
+    uint8_t scaledValue = map(flowReading, 0, 65535, 0, 255);
+    
+    Serial.print("Flow sensor reading: ");
+    Serial.print(flowReading);
+    Serial.print(" (scaled: ");
+    Serial.print(scaledValue);
+    Serial.println(")");
+    
+    return scaledValue;
+  }
+  
+  // Fallback: try single byte read
+  Wire.requestFrom(FLOW_SENSOR_ADDRESS, 1);
+  if (Wire.available() == 1) {
+    uint8_t value = Wire.read();
+    Serial.print("Flow sensor single byte: ");
+    Serial.println(value);
+    return value;
+  }
+  
+  Serial.println("No flow sensor data available");
+  return 0;
+}
+
+// --- Add missing function definitions for linker errors ---
+
+void setupWiFiAP() {
+  WiFi.softAP(AP_SSID, AP_PASSWORD);
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(IP);
+}
+
+void stopWiFiAP() {
+  WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_OFF);
+}
+
+void updateMusicModeView() {
+  u8g2.clearBuffer();
+  
+  // Centered header
+  u8g2.drawBox(0, 0, 128, 12);
+  u8g2.setColorIndex(0);
+  u8g2.setFont(u8g2_font_7x13B_tr);
+  u8g2.drawStr(20, 9, "TOUCH PIANO");
+  u8g2.setColorIndex(1);
+  
+  touch1 = touchRead(TOUCH_PIN1);
+  touch2 = touchRead(TOUCH_PIN2);
+  touch3 = touchRead(TOUCH_PIN3);
+  touch4 = touchRead(TOUCH_PIN4);
+  
+  const char* notes[] = {"A", "B", "C", "D"};
+  const int frequencies[] = {262, 294, 330, 349};
+  
+  bool anyPressed = false;
+  
+  // Centered piano keys
+  int startX = (128 - (4 * 26 - 2)) / 2;
+  
+  for (int i = 0; i < 4; i++) {
+    bool pressed = false;
+    switch (i) {
+      case 0: pressed = (touch1 < threshold); break;
+      case 1: pressed = (touch2 < threshold); break;
+      case 2: pressed = (touch3 < threshold); break;
+      case 3: pressed = (touch4 < threshold); break;
+    }
+    
+    int keyX = startX + i * 26;
+    int keyY = 20;
+    int keyW = 24;
+    int keyH = 28;
+    
+    if (pressed) {
+      // Pressed key animation
+      u8g2.drawRBox(keyX, keyY, keyW, keyH, 3);
+      u8g2.setColorIndex(0);
+      u8g2.setFont(u8g2_font_ncenB14_tr);
+      u8g2.drawStr(keyX + 8, keyY + 18, notes[i]);
+      u8g2.setColorIndex(1);
+      
+      // Musical note animation floating up
+      for (int j = 0; j < 3; j++) {
+        int noteY = 15 - (millis() / 100 + j * 5) % 10;
+        if (noteY > 5) {
+          u8g2.drawPixel(keyX + 12 + j * 2, noteY);
+          u8g2.drawPixel(keyX + 12 + j * 2 + 1, noteY);
+        }
+      }
+      
+      playTone(frequencies[i]);
+      anyPressed = true;
+    } else {
+      // Normal key
+      u8g2.drawRFrame(keyX, keyY, keyW, keyH, 3);
+      u8g2.setFont(u8g2_font_ncenB10_tr);
+      u8g2.drawStr(keyX + 9, keyY + 16, notes[i]);
+    }
+  }
+  
+  if (!anyPressed) {
+    stopTone();
+  }
+  
+  // Centered exit instruction
+  u8g2.setFont(u8g2_font_micro_tr);
+  u8g2.drawStr(75, 63, "RIGHT: EXIT");
+  
+  u8g2.sendBuffer();
+}
